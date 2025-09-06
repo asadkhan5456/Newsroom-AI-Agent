@@ -1,0 +1,764 @@
+{
+  "name": "My workflow",
+  "nodes": [
+    {
+      "parameters": {},
+      "type": "n8n-nodes-base.manualTrigger",
+      "typeVersion": 1,
+      "position": [
+        -1328,
+        -112
+      ],
+      "id": "31b43f6f-b640-4e20-9f7e-8b32f20bbad9",
+      "name": "Newsroom – Summarize & Headlines (POC)"
+    },
+    {
+      "parameters": {
+        "assignments": {
+          "assignments": [
+            {
+              "id": "8a43922d-4361-4cec-86fa-b676749969d9",
+              "name": "title",
+              "value": "Demo: Neuer Straßenbahnausbau in Freiburg",
+              "type": "string"
+            },
+            {
+              "id": "a151a980-722b-451c-b2ce-6ea07856e330",
+              "name": "body",
+              "value": "Die Stadt Freiburg baut ihr Straßenbahnnetz weiter aus. Mit der neuen Linie sollen Randbezirke schneller an die Innenstadt angebunden werden.  Nach Angaben der Stadtverwaltung verkürzt sich die Fahrzeit in der Hauptverkehrszeit um bis zu 15 Minuten.  Kritisch sehen einige Anwohner die Baustellenphase, die bis Ende nächsten Jahres dauert. Die Stadt verspricht zusätzliche Informationsabende und bessere Umleitungen.",
+              "type": "string"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.set",
+      "typeVersion": 3.4,
+      "position": [
+        -848,
+        -80
+      ],
+      "id": "583521fe-ea37-4f30-907e-2f2a6f4c7fee",
+      "name": "Input — Article"
+    },
+    {
+      "parameters": {
+        "promptType": "define",
+        "text": "=Erzeuge eine strukturierte Ausgabe für diesen Nachrichtenartikel.\n\nGib NUR ein JSON-Objekt zurück:\n{\n  \"summary\": \"3 Sätze, neutral, präzise, deutsch.\",\n  \"headlines\": [\"max. 60 Zeichen\", \"genau 3 Varianten\", \"klarer Fokus\"]\n}\n\nTitel: {{$json.title}}\n\nText:\n{{$json.body}}\n",
+        "messages": {
+          "messageValues": [
+            {
+              "message": "Antworte ausschließlich als gültiges JSON-Objekt. Kein Markdown, keine Code-Fences, keine Erklärungen."
+            },
+            {
+              "type": "HumanMessagePromptTemplate",
+              "message": "=Gib NUR dieses JSON-Objekt zurück (keine anderen Schlüssel):\n{\"summary\":\"\",\"headlines\":[\"\",\"\",\"\"]}\n\nsummary: genau 3 Sätze, neutral, präzise, deutsch.\nheadlines: genau 3 Varianten, jeweils max. 60 Zeichen, klarer Fokus.\n\nTitel: {{$json.title}}\n\nText:\n{{$json.body}}"
+            }
+          ]
+        },
+        "batching": {}
+      },
+      "type": "@n8n/n8n-nodes-langchain.chainLlm",
+      "typeVersion": 1.7,
+      "position": [
+        1120,
+        -112
+      ],
+      "id": "1e130e2e-d0a9-4cba-a089-dc47ff2a6264",
+      "name": "Basic LLM Chain"
+    },
+    {
+      "parameters": {
+        "model": "llama-3.1-8b-instant",
+        "options": {
+          "maxTokensToSample": 4096,
+          "temperature": 1
+        }
+      },
+      "type": "@n8n/n8n-nodes-langchain.lmChatGroq",
+      "typeVersion": 1,
+      "position": [
+        1200,
+        224
+      ],
+      "id": "bb484928-9075-4627-947d-4357615ada39",
+      "name": "Groq Chat Model",
+      "credentials": {
+        "groqApi": {
+          "id": "rXh33KelJsgO4sVG",
+          "name": "Groq account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForEachItem",
+        "jsCode": "// Robust validator: parse LLM JSON from many shapes, then guarantee\n// {summary, headlines[3]} with a fallback from article body.\n\n// ---------- helpers ----------\nfunction firstNonEmpty(...vals) {\n  for (const v of vals) {\n    if (v !== undefined && v !== null) {\n      const s = String(v);\n      if (s.trim() !== '') return v;\n    }\n  }\n  return '';\n}\nfunction stripFences(s) {\n  let t = String(s || '').trim();\n  t = t.replace(/^```(?:json)?\\s*/i, '').replace(/\\s*```$/,'').trim();\n  const a = t.indexOf('{'), b = t.lastIndexOf('}');\n  if (a !== -1 && b !== -1 && b > a) t = t.slice(a, b + 1);\n  return t;\n}\nfunction parseJSONSafe(s) { try { return JSON.parse(s); } catch { return {}; } }\nfunction sentencesOf(text) {\n  return String(text || '')\n    .replace(/\\s+/g, ' ')\n    .split(/(?<=[.!?])\\s+/)\n    .filter(Boolean);\n}\n\n// Pick the model's reply from common locations\nfunction pickLLMRaw(j) {\n  return firstNonEmpty(\n    j.text,\n    j.output,\n    j.response,\n    j.result,\n    j.message?.content,\n    j.choices?.[0]?.message?.content,\n    j.data?.[0]?.content,\n    j.content\n  );\n}\nfunction parseLLMObject(j) {\n  const raw = pickLLMRaw(j);\n  if (!raw) return {};\n  if (typeof raw === 'string') return parseJSONSafe(stripFences(raw));\n  if (typeof raw === 'object') return raw.output ?? raw;\n  return {};\n}\n// Prefer merged body, but fall back to common RSS fields if present\nfunction pickBody(j) {\n  return String(firstNonEmpty(\n    j.body,\n    j.article,\n    j['content:encoded'],\n    j.content,\n    j.contentSnippet,\n    ''\n  )).trim();\n}\nfunction makeSummaryFromBody(body) {\n  const s = sentencesOf(body).slice(0, 3);\n  return s.join(' ');\n}\nfunction makeHeadlines(title, body) {\n  const s = sentencesOf(body);\n  const h = [];\n  if (title) h.push(String(title).trim());\n  if (s[0]) h.push(s[0].replace(/\\.$/, ''));\n  if (s[1]) h.push(s[1].replace(/\\.$/, ''));\n  while (h.length < 3) h.push('');\n  return h.slice(0, 3).map(x => x.slice(0, 60));\n}\n\n// ---------- main ----------\nconst j = $json; // item from Merge (LLM + article on same object)\nconst llm = parseLLMObject(j);\n\nlet summary = String(llm.summary ?? '').trim();\nlet headlines = Array.isArray(llm.headlines)\n  ? llm.headlines.map(h => String(h || '').trim()).filter(Boolean)\n  : [];\n\nconst body = pickBody(j);\nconst title = String(j.title || '').trim();\n\nif (!summary) summary = makeSummaryFromBody(body) || '(keine Zusammenfassung gefunden)';\nif (headlines.length < 3) headlines = makeHeadlines(title, body);\n\n// final sanitize\nheadlines = headlines.slice(0, 3).map(h => h.slice(0, 60));\n\nreturn { json: { summary, headlines } };"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1744,
+        80
+      ],
+      "id": "4342ba37-293e-40dc-a5b7-c89fd79c8da0",
+      "name": "Validate & Normalize JSON"
+    },
+    {
+      "parameters": {
+        "assignments": {
+          "assignments": [
+            {
+              "id": "13465f31-a942-4343-977b-78668c94722b",
+              "name": "filename",
+              "value": "=summary_{{$now.format('YYYYMMDD_HHmmss')}}.json",
+              "type": "string"
+            },
+            {
+              "id": "31903ec9-d1da-4084-b88d-afcf7d409974",
+              "name": "content",
+              "value": "={{ JSON.stringify($json, null, 2) }}",
+              "type": "string"
+            },
+            {
+              "id": "0fe27f00-fb86-4813-a975-cf1ee437e7cd",
+              "name": "",
+              "value": 0,
+              "type": "number"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.set",
+      "typeVersion": 3.4,
+      "position": [
+        2160,
+        80
+      ],
+      "id": "7f92943f-ca1b-4b13-b806-7cc7bbf463fd",
+      "name": "Build File Payload"
+    },
+    {
+      "parameters": {
+        "operation": "toJson",
+        "options": {
+          "fileName": "=summary_{{$now.format('YYYYMMDD_HHmmss')}}.json"
+        }
+      },
+      "type": "n8n-nodes-base.convertToFile",
+      "typeVersion": 1.1,
+      "position": [
+        2368,
+        80
+      ],
+      "id": "c03aa697-83ac-42f5-a8e8-2d220e0abfb1",
+      "name": "Convert to File"
+    },
+    {
+      "parameters": {
+        "operation": "write",
+        "fileName": "=/Users/asadkhan/Downloads/{{$binary.data.fileName}}",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.readWriteFile",
+      "typeVersion": 1,
+      "position": [
+        2576,
+        80
+      ],
+      "id": "92130f61-2426-420f-bae0-d66161565903",
+      "name": "Read/Write Files from Disk"
+    },
+    {
+      "parameters": {
+        "assignments": {
+          "assignments": [
+            {
+              "id": "b04fca73-d84c-4350-9f5f-c3bb25f12cc8",
+              "name": "timestamp",
+              "value": "={{$now.setZone('Europe/Berlin').toFormat('yyyy-LL-dd HH:mm:ss')}}",
+              "type": "string"
+            },
+            {
+              "id": "af91953f-5734-4a17-96d3-697b8e0e449e",
+              "name": "summary_chars",
+              "value": "={{ $json.summary.length }}",
+              "type": "string"
+            },
+            {
+              "id": "d58969ff-8b90-4dc7-b796-e93d4fe3f979",
+              "name": "headline_1",
+              "value": "={{ $json.headlines[0] }}",
+              "type": "string"
+            },
+            {
+              "id": "70041c57-4782-48d5-bbf7-c1f40d34fa04",
+              "name": "headline_2",
+              "value": "={{ $json.headlines[1] }}",
+              "type": "string"
+            },
+            {
+              "id": "36d734d6-b6f9-4dad-b047-ac6f1ec1075e",
+              "name": "headline_3",
+              "value": "={{ $json.headlines[2] }}",
+              "type": "string"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.set",
+      "typeVersion": 3.4,
+      "position": [
+        1968,
+        -256
+      ],
+      "id": "33af94d5-cc3d-4b82-b78e-154fe1569c89",
+      "name": "Build Log Row"
+    },
+    {
+      "parameters": {
+        "options": {
+          "fileName": "newsroom_log.csv",
+          "headerRow": false
+        }
+      },
+      "type": "n8n-nodes-base.convertToFile",
+      "typeVersion": 1.1,
+      "position": [
+        2176,
+        -256
+      ],
+      "id": "ba4f03a1-83cc-4a41-9b68-46209dffe06f",
+      "name": "Convert to File1"
+    },
+    {
+      "parameters": {
+        "operation": "write",
+        "fileName": "=/Users/asadkhan/Downloads/{{$binary.data.fileName}}",
+        "options": {
+          "append": true
+        }
+      },
+      "type": "n8n-nodes-base.readWriteFile",
+      "typeVersion": 1,
+      "position": [
+        2384,
+        -256
+      ],
+      "id": "5752f41a-e1a5-4746-9470-966f42f2b743",
+      "name": "Read/Write Files from Disk1"
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://httpbin.org/post",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{$('Validate & Normalize JSON').last().json}}",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        2032,
+        -80
+      ],
+      "id": "3a0b8bab-1011-479e-a1d6-657cb272272d",
+      "name": "POST → Fake CMS",
+      "alwaysOutputData": false,
+      "executeOnce": false,
+      "retryOnFail": false
+    },
+    {
+      "parameters": {
+        "assignments": {
+          "assignments": [
+            {
+              "id": "ca8ed317-11a5-4039-a41e-5e83681d7378",
+              "name": "start_ms",
+              "value": "={{$now.toMillis()}}",
+              "type": "number"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.set",
+      "typeVersion": 3.4,
+      "position": [
+        -1072,
+        -96
+      ],
+      "id": "14cc3b53-34c5-4af4-b485-4299795844b2",
+      "name": "Start Timer"
+    },
+    {
+      "parameters": {
+        "assignments": {
+          "assignments": [
+            {
+              "id": "2c84fd22-2b3a-48bd-bea4-e993691db711",
+              "name": "ts",
+              "value": "={{$now.setZone('Europe/Berlin').toFormat('yyyy-LL-dd HH:mm:ss')}}",
+              "type": "string"
+            },
+            {
+              "id": "5dd597c5-1d88-49e3-8a20-8a4a309bbb22",
+              "name": "title",
+              "value": "={{ $('Auto — Article').last().json.title || $('RSS Feed Trigger').last().json.title || '' }}",
+              "type": "string"
+            },
+            {
+              "id": "6e4d3a4f-bdb5-4e6e-b945-e2d7880d8cad",
+              "name": "duration_ms",
+              "value": "={{ $now.toMillis() - $('Start Timer (web)').last().json.start_ms }}",
+              "type": "number"
+            },
+            {
+              "id": "28d02dee-1a63-424b-8ec7-8470b109fa11",
+              "name": "post_status",
+              "value": "={{ $('POST → Fake CMS').last().json.statusCode || 'n/a' }}",
+              "type": "string"
+            },
+            {
+              "id": "c2d3dfab-7369-4564-842d-ca8f2761103d",
+              "name": "post_url",
+              "value": "={{ $('POST → Fake CMS').last().json.body?.url || $('POST → Fake CMS').last().json.url || 'n/a' }}",
+              "type": "string"
+            },
+            {
+              "id": "2086394d-c15d-48d0-944c-15584f895fdd",
+              "name": "title",
+              "value": "={{ $('Auto — Article').last().json.title || $('RSS Feed Trigger').last().json.title || '' }}",
+              "type": "string"
+            },
+            {
+              "id": "ba0ab99e-d53c-4d26-92db-a1f3c7324ffa",
+              "name": "summary_len",
+              "value": "={{ $('Validate & Normalize JSON').last().json.summary.length }}",
+              "type": "string"
+            },
+            {
+              "id": "dc0c0f6e-2426-48a7-a0ba-45cf2a9a426f",
+              "name": "h1",
+              "value": "={{ $('Validate & Normalize JSON').last().json.headlines[0] }}\n",
+              "type": "string"
+            },
+            {
+              "id": "b2cd93a1-9d0d-477c-8f94-ab27af181be7",
+              "name": "h2",
+              "value": "={{ $('Validate & Normalize JSON').last().json.headlines[1] }}\n",
+              "type": "string"
+            },
+            {
+              "id": "1f0f1d9e-8307-4c75-9383-7cf5b1b058bf",
+              "name": "h3",
+              "value": "={{ $('Validate & Normalize JSON').last().json.headlines[2] }}\n",
+              "type": "string"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.set",
+      "typeVersion": 3.4,
+      "position": [
+        2240,
+        -80
+      ],
+      "id": "e11e0018-c536-499d-a6a5-cd6760f07b2a",
+      "name": "Metrics Row"
+    },
+    {
+      "parameters": {
+        "fromEmail": "Newsroom POC",
+        "toEmail": "asadfkhan5456@gmail.com",
+        "subject": "=POC – {{ $('Auto — Article').last().json.title || $json.title || '' }}\n",
+        "emailFormat": "text",
+        "text": "=Titel: {{ $('Auto — Article').last().json.title || $json.title || '' }}\n\nZusammenfassung:\n{{ $('Validate & Normalize JSON').last().json.summary || $json.summary || '' }}\n\nHeadlines:\n1) {{ $('Validate & Normalize JSON').last().json.headlines[0] || ($json.headlines && $json.headlines[0]) || '' }}\n2) {{ $('Validate & Normalize JSON').last().json.headlines[1] || ($json.headlines && $json.headlines[1]) || '' }}\n3) {{ $('Validate & Normalize JSON').last().json.headlines[2] || ($json.headlines && $json.headlines[2]) || '' }}",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.emailSend",
+      "typeVersion": 2.1,
+      "position": [
+        2032,
+        256
+      ],
+      "id": "9ca7e213-8772-4cd3-8fe9-c78cca6b0bc5",
+      "name": "Send email",
+      "webhookId": "0ea30aee-adcd-4e43-a7b6-6b8dc8723c21",
+      "credentials": {
+        "smtp": {
+          "id": "FfnCNJRk5MA4foye",
+          "name": "SMTP account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "pollTimes": {
+          "item": [
+            {
+              "mode": "everyMinute"
+            }
+          ]
+        },
+        "feedUrl": "http://www.tagesschau.de/xml/rss2"
+      },
+      "type": "n8n-nodes-base.rssFeedReadTrigger",
+      "typeVersion": 1,
+      "position": [
+        -16,
+        -112
+      ],
+      "id": "6f1fd673-7e7e-475a-9ce2-3a791163f69d",
+      "name": "RSS Feed Trigger"
+    },
+    {
+      "parameters": {
+        "url": "={{ $json.link || $json.url || $json.guid || $json.id || $('RSS Feed Trigger').last().json.link }}\n",
+        "options": {
+          "response": {
+            "response": {
+              "fullResponse": true,
+              "responseFormat": "text"
+            }
+          }
+        }
+      },
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        464,
+        -112
+      ],
+      "id": "a4064858-15a7-4d95-9d42-8f859989dfe7",
+      "name": "HTTP Request"
+    },
+    {
+      "parameters": {
+        "operation": "extractHtmlContent",
+        "extractionValues": {
+          "values": [
+            {
+              "key": "title_h1",
+              "cssSelector": "h1"
+            },
+            {
+              "key": "title_og",
+              "cssSelector": "meta[property=\"og:title\"]",
+              "returnValue": "attribute",
+              "attribute": "content"
+            },
+            {
+              "key": "article",
+              "cssSelector": "article, main article, main, div[itemprop=\"articleBody\"]"
+            }
+          ]
+        },
+        "options": {
+          "trimValues": true,
+          "cleanUpText": true
+        }
+      },
+      "type": "n8n-nodes-base.html",
+      "typeVersion": 1.2,
+      "position": [
+        672,
+        -112
+      ],
+      "id": "a1411b1e-d03e-4881-9489-ef3cb19fdc5b",
+      "name": "HTML"
+    },
+    {
+      "parameters": {
+        "assignments": {
+          "assignments": [
+            {
+              "id": "f07352a3-2741-4e05-9cc0-f8c31ca7837c",
+              "name": "title",
+              "value": "={{ $json.title_h1 || $json.title_og || $('RSS Feed Trigger').last().json.title }}",
+              "type": "string"
+            },
+            {
+              "id": "7d4b816f-2333-4f99-8629-68a3c76039d9",
+              "name": "body",
+              "value": "={{ $json.article\n  || $('RSS Feed Trigger').last().json.content\n  || $('RSS Feed Trigger').last().json['content:encoded']\n  || $('RSS Feed Trigger').last().json.contentSnippet\n  || '' }}",
+              "type": "string"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.set",
+      "typeVersion": 3.4,
+      "position": [
+        880,
+        -112
+      ],
+      "id": "630ecc43-3671-4685-ad71-bb34fdffb776",
+      "name": "Auto — Article"
+    },
+    {
+      "parameters": {
+        "mode": "combine",
+        "combineBy": "combineByPosition",
+        "options": {
+          "includeUnpaired": true
+        }
+      },
+      "type": "n8n-nodes-base.merge",
+      "typeVersion": 3.2,
+      "position": [
+        1536,
+        -304
+      ],
+      "id": "1fe0c090-356d-4612-92cc-498df246a284",
+      "name": "Merge"
+    },
+    {
+      "parameters": {
+        "assignments": {
+          "assignments": [
+            {
+              "id": "c7563e28-5382-4e4d-8fec-8815777a86bd",
+              "name": "start_ms",
+              "value": "={{$now.toMillis()}}",
+              "type": "number"
+            }
+          ]
+        },
+        "includeOtherFields": true,
+        "options": {}
+      },
+      "type": "n8n-nodes-base.set",
+      "typeVersion": 3.4,
+      "position": [
+        208,
+        -112
+      ],
+      "id": "38d6095c-0864-4246-85b2-120b821ba298",
+      "name": "Start Timer (web)",
+      "executeOnce": false,
+      "alwaysOutputData": false,
+      "retryOnFail": false
+    }
+  ],
+  "pinData": {},
+  "connections": {
+    "Newsroom – Summarize & Headlines (POC)": {
+      "main": [
+        [
+          {
+            "node": "Start Timer",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Input — Article": {
+      "main": [
+        []
+      ]
+    },
+    "Groq Chat Model": {
+      "ai_languageModel": [
+        [
+          {
+            "node": "Basic LLM Chain",
+            "type": "ai_languageModel",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Basic LLM Chain": {
+      "main": [
+        [
+          {
+            "node": "Merge",
+            "type": "main",
+            "index": 1
+          }
+        ]
+      ]
+    },
+    "Validate & Normalize JSON": {
+      "main": [
+        [
+          {
+            "node": "Build Log Row",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "Build File Payload",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "POST → Fake CMS",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "Send email",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Build File Payload": {
+      "main": [
+        [
+          {
+            "node": "Convert to File",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Convert to File": {
+      "main": [
+        [
+          {
+            "node": "Read/Write Files from Disk",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Build Log Row": {
+      "main": [
+        [
+          {
+            "node": "Convert to File1",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Convert to File1": {
+      "main": [
+        [
+          {
+            "node": "Read/Write Files from Disk1",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Start Timer": {
+      "main": [
+        [
+          {
+            "node": "Input — Article",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "POST → Fake CMS": {
+      "main": [
+        [
+          {
+            "node": "Metrics Row",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "RSS Feed Trigger": {
+      "main": [
+        [
+          {
+            "node": "Start Timer (web)",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "HTTP Request": {
+      "main": [
+        [
+          {
+            "node": "HTML",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "HTML": {
+      "main": [
+        [
+          {
+            "node": "Auto — Article",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Auto — Article": {
+      "main": [
+        [
+          {
+            "node": "Basic LLM Chain",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "Merge",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Merge": {
+      "main": [
+        [
+          {
+            "node": "Validate & Normalize JSON",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Start Timer (web)": {
+      "main": [
+        [
+          {
+            "node": "HTTP Request",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "active": false,
+  "settings": {
+    "executionOrder": "v1"
+  },
+  "versionId": "81e2e6cf-a185-4a35-8f14-0b532b2e5452",
+  "meta": {
+    "templateCredsSetupCompleted": true,
+    "instanceId": "34964cbaabfe0e3d655493093dd68e8e0c724adde4fc9b18c1deccd791a78336"
+  },
+  "id": "2AkBg3RGT34FrXmC",
+  "tags": []
+}
